@@ -1,0 +1,2 @@
+# transkript
+TRANSKRİPT ŞEKLİ KUZENİM
