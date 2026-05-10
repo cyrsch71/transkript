@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback, Suspense } from "react";
+import { useState, useRef, useEffect, useCallback, Suspense, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import LazySessionMeta from "../components/LazySessionMeta";
@@ -246,30 +246,7 @@ function EditorContent() {
             setCurrentOriginalLink(origLink);
             setOriginalLinkInput(origLink);
 
-            const contentLines = allLines.filter(l => !l.trim().startsWith("# "));
-            const parsedLines = [];
-            const parsedTimestamps = [];
-            let firstPending = -1;
-
-            for (const line of contentLines) {
-                const match = line.match(/^\[(\d{2}):(\d{2})\]\s*(.*)/);
-                if (match) {
-                    const sec = parseInt(match[1]) * 60 + parseInt(match[2]);
-                    parsedLines.push(match[3]);
-                    parsedTimestamps.push(sec);
-                } else {
-                    parsedLines.push(line);
-                    parsedTimestamps.push(null);
-                    if (firstPending === -1) firstPending = parsedLines.length - 1;
-                }
-            }
-
-            setRawLines(parsedLines);
-            setTimestamps(parsedTimestamps);
-            setCurrentLineIdx(firstPending >= 0 ? firstPending : parsedLines.length);
-            setLastAutoSaveCount(parsedTimestamps.filter(t => t !== null && t !== "skip").length);
-
-            // Fetch audio
+            // Fetch audio first to not block the network request
             const audioListRes = await fetch(`https://api.github.com/repos/${user}/${repo}/contents/public/audio`, {
                 headers: { Authorization: `Bearer ${token}` }
             });
@@ -286,8 +263,48 @@ function EditorContent() {
                 throw new Error("Ses dosyalarına erişilemedi (Yetki hatası olabilir)");
             }
 
-            setEditorReady(true);
-            setSessionLoading(false);
+            const contentLines = allLines.filter(l => !l.trim().startsWith("# "));
+            const parsedLines = [];
+            const parsedTimestamps = [];
+            let firstPending = -1;
+
+            // Process text in chunks to prevent blocking the main thread
+            const parseChunk = (startIdx) => {
+                const CHUNK_SIZE = 100;
+                const endIdx = Math.min(startIdx + CHUNK_SIZE, contentLines.length);
+                for (let i = startIdx; i < endIdx; i++) {
+                    const line = contentLines[i];
+                    const match = line.match(/^\[(\d{2}):(\d{2})\]\s*(.*)/);
+                    if (match) {
+                        const sec = parseInt(match[1]) * 60 + parseInt(match[2]);
+                        parsedLines.push(match[3]);
+                        parsedTimestamps.push(sec);
+                    } else {
+                        parsedLines.push(line);
+                        parsedTimestamps.push(null);
+                        if (firstPending === -1) firstPending = parsedLines.length - 1;
+                    }
+                }
+
+                if (endIdx < contentLines.length) {
+                    if (typeof requestIdleCallback !== "undefined") {
+                        requestIdleCallback(() => parseChunk(endIdx));
+                    } else {
+                        setTimeout(() => parseChunk(endIdx), 0);
+                    }
+                } else {
+                    setRawLines(parsedLines);
+                    setTimestamps(parsedTimestamps);
+                    setCurrentLineIdx(firstPending >= 0 ? firstPending : parsedLines.length);
+                    setLastAutoSaveCount(parsedTimestamps.filter(t => t !== null && t !== "skip").length);
+
+                    setEditorReady(true);
+                    setSessionLoading(false);
+                }
+            };
+
+            parseChunk(0);
+
         };
         loadSession().catch(e => { 
             console.error(e); 
@@ -829,6 +846,127 @@ function EditorContent() {
     const totalCount = rawLines.length;
 
     /* ────────────────── RENDER ────────────────── */
+    const renderedLines = useMemo(() => {
+        return rawLines.map((line, i) => {
+            const ts = timestamps[i];
+            const isCurrent = i === currentLineIdx;
+            const isDone = ts !== null && ts !== "skip";
+            const isSkipped = ts === "skip";
+            const isEditing = editingLineIdx === i;
+
+            return (
+                <div
+                    key={i}
+                    ref={(el) => (lineRefs.current[i] = el)}
+                    className={`
+                    flex items-start gap-3 px-3 py-2 rounded-lg transition-all text-sm
+                    ${isCurrent
+                            ? "bg-indigo-950/60 border-l-4 border-indigo-500"
+                            : isDone
+                                ? "opacity-40 border-l-4 border-transparent hover:opacity-60"
+                                : isSkipped
+                                    ? "opacity-30 border-l-4 border-transparent"
+                                    : "border-l-4 border-transparent hover:bg-white/5"
+                        }
+                  `}
+                >
+                    {/* Row number */}
+                    <span className="text-xs text-gray-600 font-mono w-6 text-right shrink-0 mt-0.5">
+                        {i + 1}
+                    </span>
+
+                    {/* Timestamp */}
+                    <span
+                        className={`text-xs font-mono w-14 shrink-0 mt-0.5 ${isDone
+                                ? "text-teal-500"
+                                : isSkipped
+                                    ? "text-gray-600"
+                                    : "text-gray-600"
+                            }`}
+                    >
+                        {isDone ? formatTimeBracket(ts) : "–"}
+                    </span>
+
+                    {/* Text - editable on click */}
+                    {isEditing ? (
+                        <input
+                            type="text"
+                            value={editingText}
+                            onChange={(e) => setEditingText(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    setRawLines(prev => {
+                                        const next = [...prev];
+                                        next[i] = editingText;
+                                        return next;
+                                    });
+                                    setEditingLineIdx(null);
+                                }
+                                if (e.key === "Escape") {
+                                    setEditingLineIdx(null);
+                                }
+                            }}
+                            onBlur={() => {
+                                setRawLines(prev => {
+                                    const next = [...prev];
+                                    next[i] = editingText;
+                                    return next;
+                                });
+                                setEditingLineIdx(null);
+                            }}
+                            autoFocus
+                            className="flex-1 bg-[#111] border border-indigo-500 rounded px-2 py-0.5 text-white text-sm focus:outline-none"
+                        />
+                    ) : (
+                        <span
+                            onClick={() => {
+                                if (isDone) {
+                                    setActiveTimestampIdx(i);
+                                    if (audioRef.current && typeof ts === "number") {
+                                        audioRef.current.currentTime = ts;
+                                    }
+                                } else {
+                                    setEditingLineIdx(i);
+                                    setEditingText(line);
+                                }
+                            }}
+                            onDoubleClick={() => {
+                                if (isDone) {
+                                    setEditingLineIdx(i);
+                                    setEditingText(line);
+                                }
+                            }}
+                            className={`cursor-pointer hover:underline hover:decoration-dotted flex-1 ${isCurrent ? "text-white" : "text-gray-400"}`}
+                        >
+                            {line}
+                        </span>
+                    )}
+
+                    {/* Fine-Tuning Buttons */}
+                    {isDone && activeTimestampIdx === i && (
+                        <div className="flex items-center gap-1 ml-auto shrink-0" onClick={(e) => e.stopPropagation()}>
+                            <HoldButton
+                                onClick={() => adjustTimestamp(-0.1)}
+                                className="w-7 h-7 flex items-center justify-center rounded bg-white/5 hover:bg-white/15 text-gray-400 hover:text-white transition-colors"
+                                title="100ms Geri (Shift + ←)"
+                            >
+                                ◀
+                            </HoldButton>
+                            <HoldButton
+                                onClick={() => adjustTimestamp(0.1)}
+                                className="w-7 h-7 flex items-center justify-center rounded bg-white/5 hover:bg-white/15 text-gray-400 hover:text-white transition-colors"
+                                title="100ms İleri (Shift + →)"
+                            >
+                                ▶
+                            </HoldButton>
+                        </div>
+                    )}
+                </div>
+            );
+        });
+    }, [rawLines, timestamps, currentLineIdx, editingLineIdx, editingText, activeTimestampIdx, adjustTimestamp]);
+
 
     // Session loading screen
     if (sessionLoading) {
@@ -1125,124 +1263,7 @@ function EditorContent() {
                     className="flex-1 overflow-y-auto p-4"
                 >
                     <div className="space-y-0.5">
-                        {rawLines.map((line, i) => {
-                            const ts = timestamps[i];
-                            const isCurrent = i === currentLineIdx;
-                            const isDone = ts !== null && ts !== "skip";
-                            const isSkipped = ts === "skip";
-                            const isEditing = editingLineIdx === i;
-
-                            return (
-                                <div
-                                    key={i}
-                                    ref={(el) => (lineRefs.current[i] = el)}
-                                    className={`
-                    flex items-start gap-3 px-3 py-2 rounded-lg transition-all text-sm
-                    ${isCurrent
-                                            ? "bg-indigo-950/60 border-l-4 border-indigo-500"
-                                            : isDone
-                                                ? "opacity-40 border-l-4 border-transparent hover:opacity-60"
-                                                : isSkipped
-                                                    ? "opacity-30 border-l-4 border-transparent"
-                                                    : "border-l-4 border-transparent hover:bg-white/5"
-                                        }
-                  `}
-                                >
-                                    {/* Row number */}
-                                    <span className="text-xs text-gray-600 font-mono w-6 text-right shrink-0 mt-0.5">
-                                        {i + 1}
-                                    </span>
-
-                                    {/* Timestamp */}
-                                    <span
-                                        className={`text-xs font-mono w-14 shrink-0 mt-0.5 ${isDone
-                                                ? "text-teal-500"
-                                                : isSkipped
-                                                    ? "text-gray-600"
-                                                    : "text-gray-600"
-                                            }`}
-                                    >
-                                        {isDone ? formatTimeBracket(ts) : "–"}
-                                    </span>
-
-                                    {/* Text - editable on click */}
-                                    {isEditing ? (
-                                        <input
-                                            type="text"
-                                            value={editingText}
-                                            onChange={(e) => setEditingText(e.target.value)}
-                                            onKeyDown={(e) => {
-                                                if (e.key === "Enter") {
-                                                    e.preventDefault();
-                                                    setRawLines(prev => {
-                                                        const next = [...prev];
-                                                        next[i] = editingText;
-                                                        return next;
-                                                    });
-                                                    setEditingLineIdx(null);
-                                                }
-                                                if (e.key === "Escape") {
-                                                    setEditingLineIdx(null);
-                                                }
-                                            }}
-                                            onBlur={() => {
-                                                setRawLines(prev => {
-                                                    const next = [...prev];
-                                                    next[i] = editingText;
-                                                    return next;
-                                                });
-                                                setEditingLineIdx(null);
-                                            }}
-                                            autoFocus
-                                            className="flex-1 bg-[#111] border border-indigo-500 rounded px-2 py-0.5 text-white text-sm focus:outline-none"
-                                        />
-                                    ) : (
-                                        <span
-                                            onClick={() => {
-                                                if (isDone) {
-                                                    setActiveTimestampIdx(i);
-                                                    if (audioRef.current && typeof ts === "number") {
-                                                        audioRef.current.currentTime = ts;
-                                                    }
-                                                } else {
-                                                    setEditingLineIdx(i);
-                                                    setEditingText(line);
-                                                }
-                                            }}
-                                            onDoubleClick={() => {
-                                                if (isDone) {
-                                                    setEditingLineIdx(i);
-                                                    setEditingText(line);
-                                                }
-                                            }}
-                                            className={`cursor-pointer hover:underline hover:decoration-dotted flex-1 ${isCurrent ? "text-white" : "text-gray-400"}`}
-                                        >
-                                            {line}
-                                        </span>
-                                    )}
-
-                                    {/* Fine-Tuning Buttons */}
-                                    {isDone && activeTimestampIdx === i && (
-                                        <div className="flex items-center gap-1 ml-auto shrink-0" onClick={(e) => e.stopPropagation()}>
-                                            <HoldButton
-                                                onClick={() => adjustTimestamp(-0.1)}
-                                                className="w-7 h-7 flex items-center justify-center rounded bg-white/5 hover:bg-white/15 text-gray-400 hover:text-white transition-colors"
-                                                title="100ms Geri (Shift + ←)"
-                                            >
-                                                ◀
-                                            </HoldButton>
-                                            <HoldButton
-                                                onClick={() => adjustTimestamp(0.1)}
-                                                className="w-7 h-7 flex items-center justify-center rounded bg-white/5 hover:bg-white/15 text-gray-400 hover:text-white transition-colors"
-                                                title="100ms İleri (Shift + →)"
-                                            >
-                                                ▶
-                                            </HoldButton>
-                                        </div>
-                                    )}
-                                </div>
-                            );
-                        })}
+                        {renderedLines}
                     </div>
                 </div>
             </div>
