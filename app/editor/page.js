@@ -3,8 +3,9 @@
 import { useState, useRef, useEffect, useCallback, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import WaveSurfer from "wavesurfer.js";
-import SessionStats from "../components/SessionStats";
+import LazySessionMeta from "../components/LazySessionMeta";
+
+
 
 function formatTime(sec) {
     if (sec == null || isNaN(sec)) return "–";
@@ -15,6 +16,35 @@ function formatTime(sec) {
 
 function formatTimeBracket(sec) {
     return `[${formatTime(sec)}]`;
+}
+
+function HoldButton({ onClick, children, className }) {
+    const timer = useRef(null);
+    const startHold = (e) => {
+        e.preventDefault();
+        onClick(); // Initial click
+        timer.current = setInterval(() => {
+            onClick();
+        }, 100);
+    };
+    const stopHold = (e) => {
+        e.preventDefault();
+        if (timer.current) {
+            clearInterval(timer.current);
+            timer.current = null;
+        }
+    };
+    return (
+        <button
+            onPointerDown={startHold}
+            onPointerUp={stopHold}
+            onPointerLeave={stopHold}
+            onContextMenu={(e) => e.preventDefault()}
+            className={className}
+        >
+            {children}
+        </button>
+    );
 }
 
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -47,18 +77,34 @@ function EditorContent() {
     const [uploadMessage, setUploadMessage] = useState("");
     const [showNameModal, setShowNameModal] = useState(false);
     const [sessionNameInput, setSessionNameInput] = useState("");
+    const [voiceActorInput, setVoiceActorInput] = useState("");
+    const [categoryInput, setCategoryInput] = useState("");
+    const [descriptionInput, setDescriptionInput] = useState("");
+    const [tagsInput, setTagsInput] = useState([]);
+    const [tagTextInput, setTagTextInput] = useState("");
+    const [originalLinkInput, setOriginalLinkInput] = useState("");
+    const [savedVoiceActors, setSavedVoiceActors] = useState([]);
+    const [savedCategories, setSavedCategories] = useState([]);
+    const [savedTags, setSavedTags] = useState([]);
     const [editingLineIdx, setEditingLineIdx] = useState(null);
     const [editingText, setEditingText] = useState("");
+    const [activeTimestampIdx, setActiveTimestampIdx] = useState(null);
     const [libSessions, setLibSessions] = useState([]);
     const [libLoading, setLibLoading] = useState(true);
+    const [metaMap, setMetaMap] = useState({}); // { id: { displayName, total, done } }
     const [currentSessionId, setCurrentSessionId] = useState(sessionParam || "");
     const [currentDisplayName, setCurrentDisplayName] = useState("");
+    const [currentVoiceActor, setCurrentVoiceActor] = useState("");
+    const [currentCategory, setCurrentCategory] = useState("");
+    const [currentDescription, setCurrentDescription] = useState("");
+    const [currentTags, setCurrentTags] = useState([]);
+    const [currentOriginalLink, setCurrentOriginalLink] = useState("");
     const [sessionLoading, setSessionLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
     const [toastMsg, setToastMsg] = useState("");
     const [lastAutoSaveCount, setLastAutoSaveCount] = useState(0);
 
-    const [wsLoading, setWsLoading] = useState(true);
+
 
     const router = useRouter();
 
@@ -83,8 +129,11 @@ function EditorContent() {
     const audioRef = useRef(null);
     const lineListRef = useRef(null);
     const lineRefs = useRef([]);
-    const waveformRef = useRef(null);
-    const wsRef = useRef(null);
+
+    const handleMetaLoaded = useCallback((meta) => {
+        setMetaMap(prev => ({ ...prev, [meta.id]: meta }));
+    }, []);
+
 
     /* ── File upload handlers ── */
     const handleAudioUpload = (e) => {
@@ -125,7 +174,7 @@ function EditorContent() {
         }
     };
 
-    /* ── Fetch library sessions ── */
+    /* ── Fetch library sessions (lightweight — directory listing only) ── */
     useEffect(() => {
         if (mode !== "library") return;
         const token = localStorage.getItem("gh_token");
@@ -137,27 +186,11 @@ function EditorContent() {
             headers: { Authorization: `Bearer ${token}`, "If-None-Match": "" }, cache: 'no-store'
         })
         .then(r => r.ok ? r.json() : Promise.reject())
-        .then(async data => {
+        .then(data => {
             if (!Array.isArray(data)) return;
             const txtFiles = data.filter(f => f.name.endsWith(".txt") && f.name !== "sessions.json").map(f => f.name.replace(".txt", ""));
-            const sessions = await Promise.all(txtFiles.map(async id => {
-                try {
-                    const res = await fetch(`https://api.github.com/repos/${user}/${repo}/contents/public/transcripts/${id}.txt`, {
-                        headers: { Authorization: `Bearer ${token}`, "If-None-Match": "" }, cache: 'no-store'
-                    });
-                    if (!res.ok) return { id, displayName: id, done: 0, total: 0 };
-                    const fileData = await res.json();
-                    const text = base64ToUtf8(fileData.content.replace(/\n/g, ''));
-                    const lines = text.split("\n").filter(l => l.trim());
-                    let displayName = id;
-                    const fl = lines[0]?.trim();
-                    if (fl?.startsWith("# display_name:")) displayName = fl.replace("# display_name:", "").trim();
-                    const contentLines = lines.filter(l => !l.startsWith("# display_name:"));
-                    const done = contentLines.filter(l => /^\[\d{2}:\d{2}\]/.test(l)).length;
-                    return { id, displayName, done, total: contentLines.length };
-                } catch { return { id, displayName: id, done: 0, total: 0 }; }
-            }));
-            setLibSessions(sessions.reverse());
+            // Only store IDs — metadata will be loaded lazily per-card
+            setLibSessions(txtFiles.reverse().map(id => ({ id, displayName: id })));
         })
         .catch(() => {})
         .finally(() => setLibLoading(false));
@@ -183,12 +216,37 @@ function EditorContent() {
             const allLines = text.split("\n").filter(l => l.trim());
             
             let dName = sessionParam;
-            const fl = allLines[0]?.trim();
-            if (fl?.startsWith("# display_name:")) dName = fl.replace("# display_name:", "").trim();
+            let vActor = "";
+            let cat = "";
+            let desc = "";
+            let tgs = [];
+            let origLink = "";
+            for (const ml of allLines) {
+                const trimmed = ml.trim();
+                if (trimmed.startsWith("# display_name:")) dName = trimmed.replace("# display_name:", "").trim();
+                else if (trimmed.startsWith("# voice_actor:")) vActor = trimmed.replace("# voice_actor:", "").trim();
+                else if (trimmed.startsWith("# category:")) cat = trimmed.replace("# category:", "").trim();
+                else if (trimmed.startsWith("# description:")) desc = trimmed.replace("# description:", "").trim();
+                else if (trimmed.startsWith("# tags:")) {
+                    const tagsStr = trimmed.replace("# tags:", "").trim();
+                    tgs = tagsStr ? tagsStr.split(",").map(t => t.trim()).filter(Boolean) : [];
+                }
+                else if (trimmed.startsWith("# original_link:")) origLink = trimmed.replace("# original_link:", "").trim();
+            }
             setCurrentDisplayName(dName);
             setSessionNameInput(dName);
+            setCurrentVoiceActor(vActor);
+            setVoiceActorInput(vActor);
+            setCurrentCategory(cat);
+            setCategoryInput(cat);
+            setCurrentDescription(desc);
+            setDescriptionInput(desc);
+            setCurrentTags(tgs);
+            setTagsInput(tgs);
+            setCurrentOriginalLink(origLink);
+            setOriginalLinkInput(origLink);
 
-            const contentLines = allLines.filter(l => !l.startsWith("# display_name:"));
+            const contentLines = allLines.filter(l => !l.trim().startsWith("# "));
             const parsedLines = [];
             const parsedTimestamps = [];
             let firstPending = -1;
@@ -243,6 +301,14 @@ function EditorContent() {
     /* ── Build txt content ── */
     const buildTxtContent = useCallback(() => {
         let output = currentDisplayName ? `# display_name: ${currentDisplayName}\n` : "";
+        if (currentCategory) output += `# category: ${currentCategory}\n`;
+        if (currentVoiceActor) output += `# voice_actor: ${currentVoiceActor}\n`;
+        if (currentDescription) output += `# description: ${currentDescription}\n`;
+        if (currentTags.length > 0) output += `# tags: ${currentTags.join(",")}\n`;
+        if (currentOriginalLink) output += `# original_link: ${currentOriginalLink}\n`;
+        if (audioRef.current && audioRef.current.duration && !isNaN(audioRef.current.duration)) {
+            output += `# audio_duration: ${formatTime(audioRef.current.duration)}\n`;
+        }
         for (let i = 0; i < rawLines.length; i++) {
             const ts = timestamps[i];
             if (ts === null || ts === "skip") {
@@ -252,7 +318,7 @@ function EditorContent() {
             }
         }
         return output;
-    }, [rawLines, timestamps, currentDisplayName]);
+    }, [rawLines, timestamps, currentDisplayName, currentCategory, currentVoiceActor, currentDescription, currentTags, currentOriginalLink]);
 
     /* ── Save progress to GitHub ── */
     const saveProgress = useCallback(async (silent = false) => {
@@ -336,6 +402,8 @@ function EditorContent() {
                 { index, prevValue: timestamps[index] },
             ]);
 
+            setActiveTimestampIdx(index);
+
             // Advance to next pending line
             const nextIdx = findNextPending(index + 1);
             setCurrentLineIdx(nextIdx);
@@ -347,6 +415,42 @@ function EditorContent() {
         },
         [timestamps, findNextPending, rawLines.length]
     );
+
+    /* ── Timestamp Fine-tuning ── */
+    const adjustTimestamp = useCallback((delta) => {
+        if (activeTimestampIdx === null) return;
+        setTimestamps(prev => {
+            const next = [...prev];
+            const oldVal = next[activeTimestampIdx];
+            if (typeof oldVal !== 'number') return next;
+            
+            let newVal = oldVal + delta;
+            if (newVal < 0) newVal = 0;
+            
+            // Cannot exceed the NEXT timestamped line
+            let nextVal = Infinity;
+            for (let i = activeTimestampIdx + 1; i < next.length; i++) {
+                if (typeof next[i] === 'number') {
+                    nextVal = next[i];
+                    break;
+                }
+            }
+            if (newVal > nextVal) newVal = nextVal;
+            
+            // Cannot go below the PREV timestamped line
+            let prevVal = 0;
+            for (let i = activeTimestampIdx - 1; i >= 0; i--) {
+                if (typeof next[i] === 'number') {
+                    prevVal = next[i];
+                    break;
+                }
+            }
+            if (newVal < prevVal) newVal = prevVal;
+
+            next[activeTimestampIdx] = newVal;
+            return next;
+        });
+    }, [activeTimestampIdx]);
 
     /* ── Controls ── */
     const undoLast = useCallback(() => {
@@ -395,12 +499,16 @@ function EditorContent() {
                 undoLast();
             } else if (e.key === "ArrowLeft") {
                 e.preventDefault();
-                if (audioRef.current) {
+                if (e.shiftKey) {
+                    adjustTimestamp(-0.1);
+                } else if (audioRef.current) {
                     audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - 5);
                 }
             } else if (e.key === "ArrowRight") {
                 e.preventDefault();
-                if (audioRef.current) {
+                if (e.shiftKey) {
+                    adjustTimestamp(0.1);
+                } else if (audioRef.current) {
                     audioRef.current.currentTime = Math.min(audioRef.current.duration || 0, audioRef.current.currentTime + 5);
                 }
             } else if (e.key.toLowerCase() === "p") {
@@ -414,7 +522,7 @@ function EditorContent() {
 
         window.addEventListener("keydown", handleKey);
         return () => window.removeEventListener("keydown", handleKey);
-    }, [editorReady, currentLineIdx, assignTimestamp, skipCurrent, undoLast]);
+    }, [editorReady, currentLineIdx, assignTimestamp, skipCurrent, undoLast, adjustTimestamp]);
 
     /* ── Auto-scroll current line into view ── */
     useEffect(() => {
@@ -426,35 +534,7 @@ function EditorContent() {
         }
     }, [currentLineIdx]);
 
-    /* ── WaveSurfer Initialization ── */
-    useEffect(() => {
-        if (!editorReady || !audioUrl || !waveformRef.current || !audioRef.current) return;
 
-        setWsLoading(true);
-        const ws = WaveSurfer.create({
-            container: waveformRef.current,
-            media: audioRef.current,
-            waveColor: '#4f46e5', // indigo-600 (muted)
-            progressColor: '#818cf8', // indigo-400 (brighter)
-            cursorColor: '#ffffff',
-            barWidth: 2,
-            barGap: 2,
-            barRadius: 2,
-            height: 48,
-            normalize: true,
-        });
-
-        wsRef.current = ws;
-
-        ws.on('ready', () => {
-            setWsLoading(false);
-        });
-
-        return () => {
-            ws.destroy();
-            wsRef.current = null;
-        };
-    }, [editorReady, audioUrl]);
 
     const togglePlay = () => {
         if (!audioRef.current) return;
@@ -571,6 +651,19 @@ function EditorContent() {
 
         // Default name without extension
         setSessionNameInput(audioFileName.replace(/\.[^/.]+$/, ""));
+        // Load previously saved voice actors, categories, and tags from localStorage
+        try {
+            const va = JSON.parse(localStorage.getItem("saved_voice_actors") || "[]");
+            setSavedVoiceActors(Array.isArray(va) ? va : []);
+        } catch { setSavedVoiceActors([]); }
+        try {
+            const cat = JSON.parse(localStorage.getItem("saved_categories") || "[]");
+            setSavedCategories(Array.isArray(cat) ? cat : []);
+        } catch { setSavedCategories([]); }
+        try {
+            const tg = JSON.parse(localStorage.getItem("saved_tags") || "[]");
+            setSavedTags(Array.isArray(tg) ? tg : []);
+        } catch { setSavedTags([]); }
         setShowNameModal(true);
     };
 
@@ -595,7 +688,26 @@ function EditorContent() {
                 throw new Error("Geçerli bir oturum adı girmediniz.");
             }
 
+            const voiceActor = voiceActorInput.trim();
+            const category = categoryInput.trim();
+            const description = descriptionInput.trim();
+            const sessionTags = [...tagsInput];
+            const originalLink = originalLinkInput.trim();
+
+            // Update current metadata state
+            setCurrentDisplayName(displayName);
+            setCurrentVoiceActor(voiceActor);
+            setCurrentCategory(category);
+            setCurrentDescription(description);
+            setCurrentTags(sessionTags);
+            setCurrentOriginalLink(originalLink);
+
             let output = `# display_name: ${displayName}\n`;
+            if (category) output += `# category: ${category}\n`;
+            if (voiceActor) output += `# voice_actor: ${voiceActor}\n`;
+            if (description) output += `# description: ${description}\n`;
+            if (sessionTags.length > 0) output += `# tags: ${sessionTags.join(",")}\n`;
+            if (originalLink) output += `# original_link: ${originalLink}\n`;
             for (let i = 0; i < rawLines.length; i++) {
                 const ts = timestamps[i];
                 if (ts === null || ts === "skip") {
@@ -603,6 +715,39 @@ function EditorContent() {
                 } else {
                     output += `${formatTimeBracket(ts)} ${rawLines[i]}\n`;
                 }
+            }
+
+            // Save voice actor to localStorage (avoid duplicates)
+            if (voiceActor) {
+                try {
+                    const existing = JSON.parse(localStorage.getItem("saved_voice_actors") || "[]");
+                    if (!existing.includes(voiceActor)) {
+                        existing.unshift(voiceActor);
+                        localStorage.setItem("saved_voice_actors", JSON.stringify(existing));
+                    }
+                } catch {}
+            }
+            // Save category to localStorage (avoid duplicates)
+            if (category) {
+                try {
+                    const existing = JSON.parse(localStorage.getItem("saved_categories") || "[]");
+                    if (!existing.includes(category)) {
+                        existing.unshift(category);
+                        localStorage.setItem("saved_categories", JSON.stringify(existing));
+                    }
+                } catch {}
+            }
+            // Save tags to localStorage (avoid duplicates)
+            if (sessionTags.length > 0) {
+                try {
+                    const existing = JSON.parse(localStorage.getItem("saved_tags") || "[]");
+                    for (const tag of sessionTags) {
+                        if (!existing.includes(tag)) {
+                            existing.unshift(tag);
+                        }
+                    }
+                    localStorage.setItem("saved_tags", JSON.stringify(existing));
+                } catch {}
             }
             
             const textBase64 = utf8ToBase64(output);
@@ -721,24 +866,29 @@ function EditorContent() {
                     ) : (
                         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
                             {libSessions.map(s => {
-                                const pct = s.total > 0 ? Math.round((s.done / s.total) * 100) : 0;
                                 const user = localStorage.getItem("gh_user");
                                 const repo = localStorage.getItem("gh_repo");
+                                const ghConfig = user && repo ? { user, repo, token: localStorage.getItem("gh_token") } : null;
+                                const meta = metaMap[s.id];
+                                const displayName = meta?.displayName || s.id;
+                                const total = meta?.total || 0;
+                                const done = meta?.done || 0;
+                                const pct = total > 0 ? Math.round((done / total) * 100) : 0;
                                 return (
                                     <Link href={`/editor?session=${encodeURIComponent(s.id)}`} key={s.id} className="group block outline-none">
                                         <div className="relative aspect-video rounded-2xl overflow-hidden bg-[#222] border border-white/5 shadow-lg group-hover:shadow-indigo-500/20 transition-all duration-300">
+                                            {ghConfig && <LazySessionMeta sessionId={s.id} ghConfig={ghConfig} onMetaLoaded={handleMetaLoaded} />}
                                             {user && repo && (
                                                 <img src={`https://raw.githubusercontent.com/${user}/${repo}/main/public/backgrounds/${s.id}.jpg`} alt="" className="absolute inset-0 w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" onError={e => e.target.style.display='none'} />
                                             )}
                                             <div className="absolute inset-x-0 bottom-0 pt-16 pb-3 px-4 bg-gradient-to-t from-black/90 via-black/50 to-transparent">
-                                                <h3 className="text-white font-bold text-base truncate group-hover:text-indigo-300 transition-colors">{s.displayName}</h3>
+                                                <h3 className="text-white font-bold text-base truncate group-hover:text-indigo-300 transition-colors">{displayName}</h3>
                                                 <div className="mt-1.5 flex items-center gap-2">
                                                     <div className="flex-1 h-1.5 bg-white/10 rounded-full overflow-hidden">
                                                         <div className="h-full rounded-full transition-all" style={{width:`${pct}%`, background: pct === 100 ? '#10b981' : '#6366f1'}}></div>
                                                     </div>
-                                                    <span className="text-xs text-gray-400 font-mono shrink-0">{s.done}/{s.total}</span>
+                                                    <span className="text-xs text-gray-400 font-mono shrink-0">{done}/{total}</span>
                                                 </div>
-                                                <SessionStats session={s} ghConfig={{ user, repo, token: localStorage.getItem("gh_token") }} />
                                             </div>
                                         </div>
                                     </Link>
@@ -846,13 +996,20 @@ function EditorContent() {
                     <span className="text-xs text-gray-400 font-mono w-12 text-right shrink-0">
                         {formatTime(currentTime)}
                     </span>
-                    <div className="flex-1 relative min-w-[200px] h-12 bg-[#1a1a1a] rounded-lg overflow-hidden border border-white/5">
-                        {wsLoading && (
-                            <div className="absolute inset-0 flex items-center justify-center text-xs text-indigo-400 bg-[#1a1a1a] z-10">
-                                Ses dalgası yükleniyor...
-                            </div>
-                        )}
-                        <div ref={waveformRef} className="w-full h-full" />
+                    <div className="flex-1 flex items-center group min-w-[200px]">
+                        <input
+                            type="range"
+                            min={0}
+                            max={duration || 0}
+                            step={0.1}
+                            value={currentTime}
+                            onChange={handleSeek}
+                            className="w-full h-1.5 bg-white/20 rounded-full appearance-none cursor-pointer group-hover:h-2 transition-all
+                              [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-indigo-400 [&::-webkit-slider-thumb]:hover:bg-indigo-300 [&::-webkit-slider-thumb]:transition-colors"
+                            style={{
+                                background: `linear-gradient(to right, #818cf8 ${(currentTime / (duration || 1)) * 100}%, rgba(255,255,255,0.15) ${(currentTime / (duration || 1)) * 100}%)`
+                            }}
+                        />
                     </div>
                     <span className="text-xs text-gray-400 font-mono w-12 shrink-0">
                         {formatTime(duration)}
@@ -1043,7 +1200,7 @@ function EditorContent() {
                                         <span
                                             onClick={() => {
                                                 if (isDone) {
-                                                    // Kullanıcının yeni isteği: tek tıklama ile o saniyeye git (seek)
+                                                    setActiveTimestampIdx(i);
                                                     if (audioRef.current && typeof ts === "number") {
                                                         audioRef.current.currentTime = ts;
                                                     }
@@ -1054,15 +1211,34 @@ function EditorContent() {
                                             }}
                                             onDoubleClick={() => {
                                                 if (isDone) {
-                                                    // Çift tıklama ile metni düzenleme
                                                     setEditingLineIdx(i);
                                                     setEditingText(line);
                                                 }
                                             }}
-                                            className={`cursor-pointer hover:underline hover:decoration-dotted ${isCurrent ? "text-white" : "text-gray-400"}`}
+                                            className={`cursor-pointer hover:underline hover:decoration-dotted flex-1 ${isCurrent ? "text-white" : "text-gray-400"}`}
                                         >
                                             {line}
                                         </span>
+                                    )}
+
+                                    {/* Fine-Tuning Buttons */}
+                                    {isDone && activeTimestampIdx === i && (
+                                        <div className="flex items-center gap-1 ml-auto shrink-0" onClick={(e) => e.stopPropagation()}>
+                                            <HoldButton
+                                                onClick={() => adjustTimestamp(-0.1)}
+                                                className="w-7 h-7 flex items-center justify-center rounded bg-white/5 hover:bg-white/15 text-gray-400 hover:text-white transition-colors"
+                                                title="100ms Geri (Shift + ←)"
+                                            >
+                                                ◀
+                                            </HoldButton>
+                                            <HoldButton
+                                                onClick={() => adjustTimestamp(0.1)}
+                                                className="w-7 h-7 flex items-center justify-center rounded bg-white/5 hover:bg-white/15 text-gray-400 hover:text-white transition-colors"
+                                                title="100ms İleri (Shift + →)"
+                                            >
+                                                ▶
+                                            </HoldButton>
+                                        </div>
                                     )}
                                 </div>
                             );
@@ -1100,6 +1276,159 @@ function EditorContent() {
                                     className="w-full bg-[#262626] border border-white/10 rounded-xl px-4 py-2.5 text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all"
                                 />
                             </div>
+
+                            {/* Voice Actor (Seslendiren) */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-400 mb-1">
+                                    🎙 Seslendiren <span className="text-gray-600 text-xs">(isteğe bağlı)</span>
+                                </label>
+                                <input
+                                    type="text"
+                                    value={voiceActorInput}
+                                    onChange={(e) => setVoiceActorInput(e.target.value)}
+                                    placeholder="Seslendiren kişinin adını yaz..."
+                                    className="w-full bg-[#262626] border border-white/10 rounded-xl px-4 py-2.5 text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all"
+                                />
+                                {savedVoiceActors.length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5 mt-2">
+                                        {savedVoiceActors.map((name) => (
+                                            <button
+                                                key={name}
+                                                type="button"
+                                                onClick={() => setVoiceActorInput(name)}
+                                                className={`px-2.5 py-1 text-xs rounded-lg border transition-all ${
+                                                    voiceActorInput === name
+                                                        ? "bg-indigo-600 border-indigo-500 text-white"
+                                                        : "bg-[#2a2a2a] border-white/10 text-gray-400 hover:border-indigo-500/50 hover:text-white"
+                                                }`}
+                                            >
+                                                {name}
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Category (Kategori) */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-400 mb-1">
+                                    🏷 Kategori <span className="text-gray-600 text-xs">(isteğe bağlı)</span>
+                                </label>
+                                <input
+                                    type="text"
+                                    value={categoryInput}
+                                    onChange={(e) => setCategoryInput(e.target.value)}
+                                    placeholder="Kategori yaz..."
+                                    className="w-full bg-[#262626] border border-white/10 rounded-xl px-4 py-2.5 text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all"
+                                />
+                                {savedCategories.length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5 mt-2">
+                                        {savedCategories.map((cat) => (
+                                            <button
+                                                key={cat}
+                                                type="button"
+                                                onClick={() => setCategoryInput(cat)}
+                                                className={`px-2.5 py-1 text-xs rounded-lg border transition-all ${
+                                                    categoryInput === cat
+                                                        ? "bg-indigo-600 border-indigo-500 text-white"
+                                                        : "bg-[#2a2a2a] border-white/10 text-gray-400 hover:border-indigo-500/50 hover:text-white"
+                                                }`}
+                                            >
+                                                {cat}
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Description (Açıklama) */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-400 mb-1">
+                                    📝 Açıklama <span className="text-gray-600 text-xs">(isteğe bağlı)</span>
+                                </label>
+                                <textarea
+                                    value={descriptionInput}
+                                    onChange={(e) => setDescriptionInput(e.target.value)}
+                                    placeholder="Oturum hakkında kısa bir açıklama..."
+                                    rows={3}
+                                    className="w-full bg-[#262626] border border-white/10 rounded-xl px-4 py-2.5 text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all resize-none text-sm"
+                                />
+                            </div>
+
+                            {/* Tags (Etiketler) */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-400 mb-1">
+                                    🏷 Etiketler <span className="text-gray-600 text-xs">(isteğe bağlı)</span>
+                                </label>
+                                {/* Tag chips */}
+                                {tagsInput.length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5 mb-2">
+                                        {tagsInput.map((tag, idx) => (
+                                            <span key={idx} className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-lg bg-indigo-600/30 border border-indigo-500/40 text-indigo-300">
+                                                {tag}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setTagsInput(prev => prev.filter((_, i) => i !== idx))}
+                                                    className="text-indigo-400 hover:text-white ml-0.5 text-[10px]"
+                                                >
+                                                    ✕
+                                                </button>
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
+                                <input
+                                    type="text"
+                                    value={tagTextInput}
+                                    onChange={(e) => setTagTextInput(e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === "Enter" || e.key === ",") {
+                                            e.preventDefault();
+                                            const val = tagTextInput.trim().replace(/,/g, "");
+                                            if (val && !tagsInput.includes(val)) {
+                                                setTagsInput(prev => [...prev, val]);
+                                            }
+                                            setTagTextInput("");
+                                        }
+                                    }}
+                                    placeholder="Etiket yazıp Enter'a basın..."
+                                    className="w-full bg-[#262626] border border-white/10 rounded-xl px-4 py-2.5 text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all text-sm"
+                                />
+                                {/* Saved tag suggestions */}
+                                {savedTags.length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5 mt-2">
+                                        {savedTags.filter(t => !tagsInput.includes(t)).slice(0, 10).map((tag) => (
+                                            <button
+                                                key={tag}
+                                                type="button"
+                                                onClick={() => {
+                                                    if (!tagsInput.includes(tag)) {
+                                                        setTagsInput(prev => [...prev, tag]);
+                                                    }
+                                                }}
+                                                className="px-2.5 py-1 text-xs rounded-lg border bg-[#2a2a2a] border-white/10 text-gray-400 hover:border-indigo-500/50 hover:text-white transition-all"
+                                            >
+                                                + {tag}
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Original Audio Link */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-400 mb-1">
+                                    🔗 Orijinal Ses Linki <span className="text-gray-600 text-xs">(isteğe bağlı)</span>
+                                </label>
+                                <input
+                                    type="text"
+                                    value={originalLinkInput}
+                                    onChange={(e) => setOriginalLinkInput(e.target.value)}
+                                    placeholder="https://..."
+                                    className="w-full bg-[#262626] border border-white/10 rounded-xl px-4 py-2.5 text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all text-sm"
+                                />
+                            </div>
+
                             <div className="flex justify-end gap-3 pt-2">
                                 <button
                                     onClick={() => setShowNameModal(false)}

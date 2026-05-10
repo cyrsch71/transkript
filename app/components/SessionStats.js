@@ -104,22 +104,7 @@ export default function SessionStats({ session, ghConfig }) {
                 }
             } catch (e) {}
 
-            // 3. Date Added
-            let dateStr = "–";
-            try {
-                const dateRes = await fetch(`https://api.github.com/repos/${user}/${repo}/commits?path=public/transcripts/${session.id}.txt&per_page=1`, {
-                    headers: { Authorization: `Bearer ${token}` }
-                });
-                if (dateRes.ok) {
-                    const commits = await dateRes.json();
-                    if (commits && commits.length > 0 && commits[0].commit?.author?.date) {
-                        const d = new Date(commits[0].commit.author.date);
-                        dateStr = d.toLocaleDateString('tr-TR', { day: 'numeric', month: 'short', year: 'numeric' });
-                    }
-                }
-            } catch (e) {}
-
-            const result = { duration: durationStr, lines: linesCount, date: dateStr };
+            const result = { duration: durationStr, lines: linesCount };
             CACHE[cacheKey] = result;
             try { sessionStorage.setItem(cacheKey, JSON.stringify(result)); } catch(e){}
             return result;
@@ -139,10 +124,6 @@ export default function SessionStats({ session, ghConfig }) {
             <div className="flex items-center gap-1">
                 <span>📝</span>
                 <span>{stats ? stats.lines : "–"}</span>
-            </div>
-            <div className="flex items-center gap-1">
-                <span>📅</span>
-                <span>{stats ? stats.date : "–"}</span>
             </div>
         </div>
     );

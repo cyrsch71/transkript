@@ -47,7 +47,7 @@ export default function Navbar() {
 
   if (!isLoaded) return null; // Avoid hydration mismatch
 
-  if (pathname && pathname.startsWith("/player")) return null;
+  if (pathname && (pathname.startsWith("/player") || pathname.startsWith("/session"))) return null;
 
   return (
     <>

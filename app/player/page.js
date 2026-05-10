@@ -114,13 +114,21 @@ function PlayerContent() {
         const text = base64ToUtf8(fileData.content.replace(/\n/g, ''));
         
         let dName = currentSession;
-        const firstLine = text.split('\n')[0].trim();
-        if (firstLine.startsWith("# display_name:")) {
-            dName = firstLine.replace("# display_name:", "").trim();
+        const allLines = text.split('\n');
+        for (const line of allLines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith("# display_name:")) {
+                dName = trimmed.replace("# display_name:", "").trim();
+            }
         }
         setDisplayName(dName);
 
-        setLines(parseTranscript(text));
+        // Filter out metadata lines before parsing transcript
+        const cleanText = allLines.filter(l => {
+            const t = l.trim();
+            return !t.startsWith("# ");
+        }).join('\n');
+        setLines(parseTranscript(cleanText));
         setActiveIndex(-1);
       })
       .catch(() => setLines([]))
@@ -297,14 +305,14 @@ function PlayerContent() {
             className="w-full h-full object-cover"
             onError={() => setBgError(true)}
           />
-          <div className="absolute inset-0 backdrop-blur-[40px] bg-black/45"></div>
+          <div className="absolute inset-0 backdrop-blur-[16px] bg-black/40"></div>
         </div>
       )}
 
       {/* Audio element (hidden) */}
       <audio ref={audioRef} src={audioUrl || undefined} preload="metadata" />
 
-      {/* Top bar - Back button and Search */}
+      {/* Top bar - Back button */}
       <div className="absolute top-0 left-0 right-0 p-6 z-20 flex justify-between items-start pointer-events-none">
         <Link
           href="/"
@@ -312,22 +320,6 @@ function PlayerContent() {
         >
           <span>←</span> Oturumlar
         </Link>
-        <button
-          onClick={() => setIsSearchOpen(true)}
-          className="pointer-events-auto flex items-center justify-center w-10 h-10 text-white opacity-60 hover:opacity-100 hover:text-indigo-300 transition-all bg-black/30 rounded-full backdrop-blur-md border border-white/10"
-          title="Metinde Ara (Ctrl+F)"
-        >
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
-        </button>
-      </div>
-      
-      {/* Small Session Title Top Center */}
-      <div className="absolute top-0 left-0 right-0 p-6 flex justify-center z-10 pointer-events-none opacity-40">
-        <span className="text-white text-xs font-bold tracking-widest uppercase truncate max-w-sm text-center">
-          {displayName || currentSession}
-        </span>
       </div>
 
       {/* Transcript Area */}
@@ -378,47 +370,92 @@ function PlayerContent() {
         )}
       </div>
 
-      {/* Bottom Bar (Controls) */}
-      <div className="shrink-0 bg-gradient-to-t from-black via-black/90 to-transparent pt-12 pb-6 px-6 md:px-12 flex items-center gap-4 md:gap-6 z-20 absolute bottom-0 left-0 right-0 pointer-events-auto">
-        <button
-          onClick={togglePlay}
-          className="w-12 h-12 flex items-center justify-center rounded-full bg-white text-black hover:scale-105 transition-transform shrink-0"
-        >
-          {isPlaying ? (
-             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-          ) : (
-             <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" className="ml-1"><path d="M8 5v14l11-7z"/></svg>
-          )}
-        </button>
-        
-        <span className="text-xs text-white/50 font-mono shrink-0 w-10 text-right">{formatTime(currentTime)}</span>
-        
-        <div className="flex-1 flex items-center group">
-          <input
-            type="range"
-            min={0}
-            max={duration || 0}
-            step={0.1}
-            value={currentTime}
-            onChange={handleSeek}
-            className="w-full h-1.5 bg-white/20 rounded-full appearance-none cursor-pointer group-hover:h-2 transition-all
-              [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-0 [&::-webkit-slider-thumb]:h-0"
-            style={{
-              background: `linear-gradient(to right, white ${(currentTime / (duration || 1)) * 100}%, rgba(255,255,255,0.2) ${(currentTime / (duration || 1)) * 100}%)`
-            }}
-          />
+      {/* Bottom Bar (Controls) Apple Music Style */}
+      <div 
+        className="fixed bottom-0 left-0 right-0 z-20 pointer-events-auto flex flex-col justify-end"
+        style={{
+          background: "linear-gradient(to top, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.0) 100%)",
+          padding: "12px 28px 20px"
+        }}
+      >
+        {/* Row 1: Session name & controls */}
+        <div className="flex items-center justify-between w-full mb-3">
+          {/* LEFT: Session Name */}
+          <div className="truncate pr-4 text-[12px] text-white/45 font-medium">
+            {displayName || currentSession || "Yükleniyor..."}
+          </div>
+          
+          {/* RIGHT: Speed, Play/Pause, Search */}
+          <div className="flex items-center gap-4 shrink-0">
+            {/* Speed Selectors */}
+            <div className="flex items-center gap-1">
+              {SPEEDS.map(s => (
+                <button
+                  key={s}
+                  onClick={() => handleSpeedChange(s)}
+                  className={`text-[11px] font-bold px-2 py-0.5 rounded-full transition-colors ${speed === s ? "bg-white/15 text-white" : "text-white/40 hover:text-white/70"}`}
+                >
+                  {s}x
+                </button>
+              ))}
+            </div>
+            
+            {/* Search Icon */}
+            <button
+              onClick={() => setIsSearchOpen(true)}
+              className="w-8 h-8 flex items-center justify-center text-white/60 hover:text-white transition-colors"
+              title="Metinde Ara (Ctrl+F)"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            </button>
+
+            {/* Play/Pause Button */}
+            <button
+              onClick={togglePlay}
+              className="w-[34px] h-[34px] flex items-center justify-center rounded-full border-[1.5px] border-white/70 hover:bg-white/10 transition-colors shrink-0"
+            >
+              {isPlaying ? (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="white"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="white" className="ml-0.5"><path d="M8 5v14l11-7z"/></svg>
+              )}
+            </button>
+          </div>
         </div>
-        
-        <span className="text-xs text-white/50 font-mono shrink-0 w-10">{formatTime(duration)}</span>
-        
-        <div className="flex items-center gap-2 shrink-0 ml-2">
-          <select 
-            value={speed} 
-            onChange={(e) => handleSpeedChange(parseFloat(e.target.value))}
-            className="bg-transparent text-white/60 hover:text-white text-xs font-bold focus:outline-none cursor-pointer appearance-none text-center transition-colors"
-          >
-            {SPEEDS.map(s => <option key={s} value={s} className="bg-black text-white">{s}x</option>)}
-          </select>
+
+        {/* Row 2: Seekbar */}
+        <div className="flex items-center gap-3 w-full">
+          <span className="text-[11px] text-white/40 font-mono shrink-0 w-9 text-right">{formatTime(currentTime)}</span>
+          
+          <div className="flex-1 relative flex items-center group/slider h-4">
+            <input
+              type="range"
+              min={0}
+              max={duration || 0}
+              step={0.1}
+              value={currentTime}
+              onChange={handleSeek}
+              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+            />
+            {/* Visual Track */}
+            <div 
+              className="w-full h-[2px] rounded-[1px] group-hover/slider:h-[4px] transition-all duration-150 ease-out overflow-visible relative pointer-events-none"
+              style={{ background: "rgba(255,255,255,0.18)" }}
+            >
+              {/* Fill */}
+              <div 
+                 className="absolute top-0 bottom-0 left-0 rounded-[1px]" 
+                 style={{ width: `${(currentTime / (duration || 1)) * 100}%`, background: "rgba(255,255,255,0.75)" }}
+              ></div>
+              {/* Thumb Dot */}
+              <div 
+                className="absolute top-1/2 -translate-y-1/2 w-2.5 h-2.5 bg-white rounded-full opacity-0 group-hover/slider:opacity-100 transition-opacity duration-150 shadow-sm"
+                style={{ left: `calc(${(currentTime / (duration || 1)) * 100}% - 5px)` }}
+              ></div>
+            </div>
+          </div>
+          
+          <span className="text-[11px] text-white/40 font-mono shrink-0 w-9">{formatTime(duration)}</span>
         </div>
       </div>
 
