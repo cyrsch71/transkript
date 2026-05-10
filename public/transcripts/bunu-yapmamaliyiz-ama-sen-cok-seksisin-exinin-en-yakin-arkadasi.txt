@@ -1,4 +1,6 @@
-# display_name: “Bunu yapmamalıyız... Ama sen çok seksisin!" Exinin En Yakın Arkadaşı
+# display_name: bunu-yapmamaliyiz-ama-sen-cok-seksisin-exinin-en-yakin-arkadasi
+# category: Kadın
+# voice_actor: Elly
 [00:53] Aman Tanrım! Durduğunuz için çok teşekkür ederim!
 [00:58] Az önce lastiğim patladı ve ben…
 [01:00] Bir saniye…
